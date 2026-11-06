@@ -1,62 +1,137 @@
 
-const express = require('express');
+const express = require('express')
+const { MongoClient } = require('mongodb')
+const path = require('path')
 
-const { MongoClient } = require('mongodb');
+// ======================================
+// SERVER CONFIGURATION
+// ======================================
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+const app = express()
 
-const client = new MongoClient(process.env.MONGODB_URI);
-const db = client.db(process.env.DB_NAME);
+const PORT = process.env.PORT || 3000
 
-// Allow the server to read JSON requests
-app.use(express.json());
+const client = new MongoClient(
+  process.env.MONGODB_URI
+)
 
+const db = client.db(
+  process.env.DB_NAME || 'afterSchoolLessons'
+)
 
- // Allow requests from our Vue.js frontend
+// Parse incoming JSON data
+app.use(express.json())
+
+// ======================================
+// LOGGER MIDDLEWARE
+// ======================================
+
+// Log every request to the server
+app.use((req, res, next) => {
+  console.log(
+    `${new Date().toISOString()} - ${req.method} ${req.url}`
+  )
+
+  next()
+})
+
+// ======================================
+// CORS MIDDLEWARE
+// ======================================
+
+// Allow our Vue frontend to access the API
 app.use((req, res, next) => {
   res.setHeader(
     'Access-Control-Allow-Origin',
     'http://localhost:5173'
-  );
+  )
 
   res.setHeader(
     'Access-Control-Allow-Methods',
     'GET, POST, PUT, OPTIONS'
-  );
+  )
 
   res.setHeader(
     'Access-Control-Allow-Headers',
     'Content-Type'
-  );
+  )
 
   if (req.method === 'OPTIONS') {
-    return res.sendStatus(204);
+    return res.sendStatus(204)
   }
 
-  next();
-});
+  next()
+})
 
+// ======================================
+// STATIC FILE MIDDLEWARE
+// ======================================
 
-// Our first GET route
+// Serve images from the staticFiles folder
+app.use(
+  '/images',
+  express.static(
+    path.join(__dirname, 'staticFiles')
+  )
+)
+
+// Handle images that do not exist
+app.use('/images', (req, res) => {
+  res.status(404).json({
+    error: 'Image not found'
+  })
+})
+
+// ======================================
+// HOME API ROUTE
+// ======================================
+
 app.get('/', (req, res) => {
-  res.json({ message: 'After-school lessons API is running' });
-});
+  res.json({
+    message: 'Huz Academy API is running'
+  })
+})
 
+// ======================================
+// GET ALL LESSONS
+// ======================================
 
 app.get('/lessons', async (req, res) => {
   try {
-    const lessons = await db.collection('lesson').find({}).toArray();
+    const lessons = await db
+      .collection('lesson')
+      .find({})
+      .toArray()
 
-    res.json(lessons);
+    res.json(lessons)
   } catch (error) {
-    console.error('Error fetching lessons:', error);
-    res.status(500).json({ error: 'Failed to retrieve lessons' });
+    console.error(
+      'Error retrieving lessons:',
+      error
+    )
+
+    res.status(500).json({
+      error: 'Failed to retrieve lessons'
+    })
   }
-});
+})
 
+// ======================================
+// HANDLE UNKNOWN ROUTES
+// ======================================
 
-// Start the server
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Route not found'
+  })
+})
+
+// ======================================
+// START SERVER
+// ======================================
+
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+  console.log(
+    `Huz Academy backend running on port ${PORT}`
+  )
+})
