@@ -1,6 +1,6 @@
 
 const express = require('express')
-const { MongoClient } = require('mongodb')
+const { MongoClient, ObjectId } = require('mongodb')
 const path = require('path')
 
 // ======================================
@@ -112,6 +112,103 @@ app.get('/lessons', async (req, res) => {
 
     res.status(500).json({
       error: 'Failed to retrieve lessons'
+    })
+  }
+})
+
+
+ // ======================================
+ // POST NEW ORDER
+ // ======================================
+
+app.post('/orders', async (req, res) => {
+  try {
+    // Retrieve the customer's checkout information
+    const { name, phone, lessonIDs } = req.body || {}
+
+    // Validate the customer's name
+    const validName =
+      typeof name === 'string' &&
+      /^[A-Za-z]+(?: [A-Za-z]+)*$/.test(name.trim())
+
+    // Validate the customer's phone number
+    const validPhone =
+      typeof phone === 'string' &&
+      /^[0-9]+$/.test(phone.trim())
+
+    if (!validName || !validPhone) {
+      return res.status(400).json({
+        error: 'Invalid customer name or phone number'
+      })
+    }
+
+    // Check that the order contains valid lesson IDs
+    const validLessonIDs =
+      Array.isArray(lessonIDs) &&
+      lessonIDs.length > 0 &&
+      lessonIDs.every(
+        id => typeof id === 'string' &&
+          /^[a-fA-F0-9]{24}$/.test(id)
+      )
+
+    if (!validLessonIDs) {
+      return res.status(400).json({
+        error: 'Invalid or missing lesson IDs'
+      })
+    }
+
+    // Convert lesson ID strings to MongoDB ObjectIds
+    const objectIDs = lessonIDs.map(
+      id => new ObjectId(id)
+    )
+
+    // Check that every selected lesson exists
+    const uniqueIDs = [
+      ...new Set(lessonIDs)
+    ].map(id => new ObjectId(id))
+
+    const existingLessons = await db
+      .collection('lesson')
+      .countDocuments({
+        _id: { $in: uniqueIDs }
+      })
+
+    if (existingLessons !== uniqueIDs.length) {
+      return res.status(400).json({
+        error: 'One or more lessons do not exist'
+      })
+    }
+
+    // Prepare the order document
+    const newOrder = {
+      name: name.trim(),
+      phone: phone.trim(),
+      lessonIDs: objectIDs,
+      numberOfSpaces: objectIDs.length,
+      orderDate: new Date()
+    }
+
+    // Save the order to MongoDB
+    const result = await db
+      .collection('order')
+      .insertOne(newOrder)
+
+    console.log(
+      'Order saved successfully:',
+      result.insertedId
+    )
+
+    res.status(201).json({
+      message: 'Order saved successfully',
+      orderId: result.insertedId,
+      numberOfSpaces: newOrder.numberOfSpaces
+    })
+
+  } catch (error) {
+    console.error('Error saving order:', error)
+
+    res.status(500).json({
+      error: 'Failed to save order'
     })
   }
 })
