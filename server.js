@@ -214,6 +214,66 @@ app.post('/orders', async (req, res) => {
 })
 
 // ======================================
+// UPDATE LESSON BY ID
+// ======================================
+
+app.put('/lessons/:id', async (req, res) => {
+  try {
+    const { id } = req.params
+
+    // Validate the provided ID is a valid MongoDB ObjectId
+    if (!/^[a-fA-F0-9]{24}$/.test(id)) {
+      return res.status(400).json({
+        error: 'Invalid lesson ID format'
+      })
+    }
+
+    const updates = req.body || {}
+
+    // Only allow updating safe fields
+    const allowedFields = ['price', 'space', 'subject', 'location', 'description', 'image']
+    const filteredUpdates = {}
+
+    for (const key of allowedFields) {
+      if (key in updates) {
+        filteredUpdates[key] = updates[key]
+      }
+    }
+
+    if (Object.keys(filteredUpdates).length === 0) {
+      return res.status(400).json({
+        error: 'No valid fields provided to update'
+      })
+    }
+
+    const result = await db
+      .collection('lesson')
+      .updateOne(
+        { _id: new ObjectId(id) },
+        { $set: filteredUpdates }
+      )
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        error: 'Lesson not found'
+      })
+    }
+
+    res.json({
+      message: 'Lesson updated successfully',
+      modifiedCount: result.modifiedCount
+    })
+
+  } catch (error) {
+    console.error('Error updating lesson:', error)
+
+    res.status(500).json({
+      error: 'Failed to update lesson'
+    })
+  }
+})
+
+// ======================================
 // HANDLE UNKNOWN ROUTES
 // ======================================
 
