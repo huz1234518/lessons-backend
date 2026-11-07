@@ -20,7 +20,6 @@ const db = client.db(
 // LOGGER MIDDLEWARE
 // ======================================
 
-// Log all incoming requests.
 app.use((req, res, next) => {
   console.log(
     `${new Date().toISOString()} - ${req.method} ${req.url}`
@@ -33,7 +32,6 @@ app.use((req, res, next) => {
 // CORS MIDDLEWARE
 // ======================================
 
-// Allow requests from the Vue frontend.
 app.use((req, res, next) => {
   res.setHeader(
     'Access-Control-Allow-Origin',
@@ -61,10 +59,10 @@ app.use((req, res, next) => {
 app.use(express.json())
 
 // ======================================
-// STATIC FILE MIDDLEWARE
+// STATIC FILES
 // ======================================
 
-// Serve lesson images from staticFiles.
+// Serve lesson images and teacher portraits.
 app.use(
   '/images',
   express.static(
@@ -72,7 +70,7 @@ app.use(
   )
 )
 
-// Return 404 when an image does not exist.
+// Handle missing images.
 app.use('/images', (req, res) => {
   res.status(404).json({
     error: 'Image not found'
@@ -80,7 +78,7 @@ app.use('/images', (req, res) => {
 })
 
 // ======================================
-// HOME API ROUTE
+// HOME ROUTE
 // ======================================
 
 app.get('/', (req, res) => {
@@ -100,22 +98,19 @@ app.get('/lessons', async (req, res) => {
       .find({})
       .toArray()
 
-    res.json(lessons)
+    return res.status(200).json(lessons)
 
   } catch (error) {
-    console.error(
-      'Error retrieving lessons:',
-      error
-    )
+    console.error('Error retrieving lessons:', error)
 
-    res.status(500).json({
+    return res.status(500).json({
       error: 'Failed to retrieve lessons'
     })
   }
 })
 
 // ======================================
-// POST NEW ORDER WITH SPACE RESERVATION
+// POST ORDERS
 // ======================================
 
 app.post('/orders', async (req, res) => {
@@ -147,8 +142,8 @@ app.post('/orders', async (req, res) => {
     })
   }
 
-  // Count spaces requested for each lesson.
-  // Repeated IDs represent multiple spaces.
+  // Count how many spaces are being purchased
+  // for each lesson.
   const quantities = new Map()
 
   for (const id of lessonIDs) {
@@ -160,21 +155,21 @@ app.post('/orders', async (req, res) => {
     )
   }
 
-  // Start a MongoDB session.
   const session = client.startSession()
 
   try {
-    // Perform booking operations in one transaction.
+    // Reserve spaces and save the order
+    // using a MongoDB transaction.
     const booking = await session.withTransaction(
       async () => {
         const updatedLessons = []
 
         const lessonCollection = db.collection('lesson')
 
-        // Reserve available spaces.
         for (const [id, quantity] of quantities) {
           const objectId = new ObjectId(id)
 
+          // Only reserve spaces if enough are available.
           const result = await lessonCollection.updateOne(
             {
               _id: objectId,
@@ -186,18 +181,17 @@ app.post('/orders', async (req, res) => {
             { session }
           )
 
-          // Reject unavailable lessons.
           if (result.matchedCount !== 1) {
-            const error = new Error(
+            const unavailable = new Error(
               'A selected lesson does not exist or has insufficient spaces'
             )
 
-            error.statusCode = 409
+            unavailable.statusCode = 409
 
-            throw error
+            throw unavailable
           }
 
-          // Get the remaining spaces.
+          // Retrieve remaining availability.
           const updatedLesson =
             await lessonCollection.findOne(
               { _id: objectId },
@@ -213,8 +207,8 @@ app.post('/orders', async (req, res) => {
           })
         }
 
-        // Prepare the new order.
-        const order = {
+        // Prepare the order document.
+        const newOrder = {
           name: name.trim(),
           phone: phone.trim(),
           lessonIDs: lessonIDs.map(
@@ -224,14 +218,14 @@ app.post('/orders', async (req, res) => {
           orderDate: new Date()
         }
 
-        // Save the order in the same transaction.
+        // Insert order into MongoDB.
         const result = await db
           .collection('order')
-          .insertOne(order, { session })
+          .insertOne(newOrder, { session })
 
         return {
           orderId: result.insertedId,
-          numberOfSpaces: order.numberOfSpaces,
+          numberOfSpaces: newOrder.numberOfSpaces,
           updatedLessons
         }
       }
@@ -248,10 +242,7 @@ app.post('/orders', async (req, res) => {
     })
 
   } catch (error) {
-    console.error(
-      'Error processing booking:',
-      error
-    )
+    console.error('Error processing booking:', error)
 
     return res.status(
       error.statusCode === 409 ? 409 : 500
@@ -270,15 +261,12 @@ app.post('/orders', async (req, res) => {
 // PUT UPDATE LESSON
 // ======================================
 
-// Update permitted lesson attributes.
-// Also supports conditional availability checks.
-
 app.put('/lessons/:id', async (req, res) => {
   try {
     const lessonID = req.params.id
     const updates = req.body
 
-    // Validate MongoDB ID.
+    // Validate MongoDB lesson ID.
     if (!/^[a-fA-F0-9]{24}$/.test(lessonID)) {
       return res.status(400).json({
         error: 'Invalid lesson ID'
@@ -296,7 +284,6 @@ app.put('/lessons/:id', async (req, res) => {
       })
     }
 
-    // Allowed lesson attributes.
     const allowedFields = [
       'topic',
       'location',
@@ -367,12 +354,12 @@ app.put('/lessons/:id', async (req, res) => {
     }
 
     // ======================================
-    // CONDITIONAL AVAILABILITY UPDATE
+    // CONDITIONAL AVAILABILITY CHECK
     // ======================================
 
-    // POST already deducts booked spaces.
-    // PUT confirms the remaining availability
-    // without deducting it twice.
+    // POST already deducts purchased spaces.
+    // This conditional PUT confirms availability
+    // without deducting the spaces again.
 
     if (req.query.expectedSpace !== undefined) {
       const rawExpected = req.query.expectedSpace
@@ -391,11 +378,10 @@ app.put('/lessons/:id', async (req, res) => {
         })
       }
 
-      // Only match if availability has not changed.
       filter.space = expectedSpace
     }
 
-    // Update the MongoDB lesson document.
+    // Update the lesson.
     const result = await db
       .collection('lesson')
       .updateOne(
@@ -426,17 +412,14 @@ app.put('/lessons/:id', async (req, res) => {
       .collection('lesson')
       .findOne({ _id: objectId })
 
-    return res.json({
+    return res.status(200).json({
       message: 'Lesson updated successfully',
       modifiedCount: result.modifiedCount,
       lesson: updatedLesson
     })
 
   } catch (error) {
-    console.error(
-      'Error updating lesson:',
-      error
-    )
+    console.error('Error updating lesson:', error)
 
     return res.status(500).json({
       error: 'Failed to update lesson'
@@ -448,17 +431,11 @@ app.put('/lessons/:id', async (req, res) => {
 // GET LESSON ENROLMENT
 // ======================================
 
-// Returns the number of purchased spaces
-// for a particular lesson.
-//
-// Example:
-// GET /enrolment/LESSON_ID
-
 app.get('/enrolment/:lessonid', async (req, res) => {
   try {
     const lessonID = req.params.lessonid
 
-    // Validate lesson ID.
+    // Validate ID.
     if (!/^[a-fA-F0-9]{24}$/.test(lessonID)) {
       return res.status(400).json({
         error: 'Invalid lesson ID'
@@ -467,7 +444,7 @@ app.get('/enrolment/:lessonid', async (req, res) => {
 
     const objectId = new ObjectId(lessonID)
 
-    // Check that the lesson exists.
+    // Check lesson exists.
     const lesson = await db
       .collection('lesson')
       .findOne({ _id: objectId })
@@ -478,18 +455,8 @@ app.get('/enrolment/:lessonid', async (req, res) => {
       })
     }
 
-    // ======================================
-    // CALCULATE ENROLMENT FROM ORDERS
-    // ======================================
-
-    // Each occurrence of a lesson ID represents
-    // one purchased space.
-    //
-    // $unwind separates the IDs within orders.
-    // $match selects purchases for this lesson.
-    // $count counts all matching purchases.
-
-    const result = await db
+    // Count purchased spaces in the order collection.
+    const counts = await db
       .collection('order')
       .aggregate([
         {
@@ -506,77 +473,12 @@ app.get('/enrolment/:lessonid', async (req, res) => {
       ])
       .toArray()
 
-    // If no orders exist, enrolment is zero.
     const enrolment =
-      result.length > 0 ? result[0].total : 0
+      counts.length > 0 ? counts[0].total : 0
 
     console.log(
       `Enrolment for ${lesson.topic}: ${enrolment}`
     )
-
-    return res.status(200).json({
-      lessonID: lessonID,
-      topic: lesson.topic,
-      enrolment: enrolment
-    })
-
-  } catch (error) {
-    console.error(
-      'Error retrieving enrolment:',
-      error
-    )
-
-    return res.status(500).json({
-      error: 'Failed to retrieve enrolment'
-    })
-  }
-})
-
-// ======================================
-// HANDLE UNKNOWN ROUTES
-// ======================================
-
- // ======================================
- // GET LESSON ENROLMENT
- // ======================================
-
-app.get('/enrolment/:lessonid', async (req, res) => {
-  try {
-    const lessonID = req.params.lessonid
-
-    // Validate lesson ID
-    if (!/^[a-fA-F0-9]{24}$/.test(lessonID)) {
-      return res.status(400).json({
-        error: 'Invalid lesson ID'
-      })
-    }
-
-    const objectId = new ObjectId(lessonID)
-
-    // Check whether the lesson exists
-    const lesson = await db
-      .collection('lesson')
-      .findOne({ _id: objectId })
-
-    if (!lesson) {
-      return res.status(404).json({
-        error: 'Lesson not found'
-      })
-    }
-
-    // Count purchased spaces from order documents
-    const result = await db
-      .collection('order')
-      .aggregate([
-        { $unwind: '$lessonIDs' },
-        { $match: { lessonIDs: objectId } },
-        { $count: 'total' }
-      ])
-      .toArray()
-
-    const enrolment = result.length > 0
-      ? result[0].total
-      : 0
 
     return res.status(200).json({
       lessonID,
@@ -593,6 +495,96 @@ app.get('/enrolment/:lessonid', async (req, res) => {
   }
 })
 
+// ======================================
+// GET ALL TEACHERS — NEW FEATURE
+// ======================================
+
+// Return the three teachers stored in MongoDB.
+//
+// Each teacher document contains:
+// firstName, lastName, image,
+// displayOrder and lessonIDs.
+//
+// GET /teachers
+
+app.get('/teachers', async (req, res) => {
+  try {
+    // ======================================
+    // RETRIEVE TEACHERS
+    // ======================================
+
+    const teachers = await db
+      .collection('teacher')
+      .find({})
+      .sort({ displayOrder: 1 })
+      .toArray()
+
+    // ======================================
+    // RETRIEVE LESSON TOPICS
+    // ======================================
+
+    const lessons = await db
+      .collection('lesson')
+      .find({})
+      .project({ topic: 1 })
+      .toArray()
+
+    // Match each lesson ID to its lesson document.
+    const lessonMap = new Map(
+      lessons.map(lesson => [
+        lesson._id.toString(),
+        lesson
+      ])
+    )
+
+    // ======================================
+    // COMBINE TEACHERS WITH THEIR LESSONS
+    // ======================================
+
+    const results = teachers.map(teacher => {
+      const lessonIDs = Array.isArray(teacher.lessonIDs)
+        ? teacher.lessonIDs
+        : []
+
+      return {
+        _id: teacher._id,
+
+        firstName: teacher.firstName,
+
+        lastName: teacher.lastName,
+
+        image: teacher.image,
+
+        lessonIDs: lessonIDs,
+
+        lessons: lessonIDs
+          .map(id => lessonMap.get(id.toString()))
+          .filter(Boolean)
+          .map(lesson => ({
+            _id: lesson._id,
+            topic: lesson.topic
+          }))
+      }
+    })
+
+    console.log(
+      `Retrieved ${results.length} teachers`
+    )
+
+    return res.status(200).json(results)
+
+  } catch (error) {
+    console.error('Error retrieving teachers:', error)
+
+    return res.status(500).json({
+      error: 'Failed to retrieve teachers'
+    })
+  }
+})
+
+// ======================================
+// HANDLE UNKNOWN ROUTES
+// ======================================
 
 app.use((req, res) => {
   res.status(404).json({
