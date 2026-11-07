@@ -17,7 +17,6 @@ const db = client.db(process.env.DB_NAME || 'afterSchoolLessons')
 // LOGGER MIDDLEWARE
 // ======================================
 
-// Log requests, including those rejected for invalid JSON.
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`)
   next()
@@ -27,7 +26,6 @@ app.use((req, res, next) => {
 // CORS MIDDLEWARE
 // ======================================
 
-// Allow requests from the local Vue development server.
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', 'http://localhost:5173')
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS')
@@ -40,11 +38,10 @@ app.use((req, res, next) => {
   next()
 })
 
-// Parse incoming JSON after logging and CORS handling.
 app.use(express.json())
 
 // ======================================
-// STATIC FILE MIDDLEWARE
+// STATIC LESSON IMAGES
 // ======================================
 
 app.use('/images', express.static(path.join(__dirname, 'staticFiles')))
@@ -54,7 +51,7 @@ app.use('/images', (req, res) => {
 })
 
 // ======================================
-// HOME API ROUTE
+// HOME ROUTE
 // ======================================
 
 app.get('/', (req, res) => {
@@ -76,13 +73,13 @@ app.get('/lessons', async (req, res) => {
 })
 
 // ======================================
-// POST NEW ORDER WITH SPACE RESERVATION
+// POST AN ORDER WITH SPACE RESERVATION
 // ======================================
 
 app.post('/orders', async (req, res) => {
   const { name, phone, lessonIDs } = req.body || {}
 
-  // Validate the name, phone number and selected MongoDB IDs.
+  // Validate customer details
   const validName =
     typeof name === 'string' &&
     /^[A-Za-z]+(?: [A-Za-z]+)*$/.test(name.trim())
@@ -104,8 +101,9 @@ app.post('/orders', async (req, res) => {
     })
   }
 
-  // A repeated lesson ID means the customer selected multiple spaces.
+  // Repeated lesson IDs mean multiple spaces in one lesson
   const quantities = new Map()
+
   for (const id of lessonIDs) {
     const key = id.toLowerCase()
     quantities.set(key, (quantities.get(key) || 0) + 1)
@@ -114,8 +112,7 @@ app.post('/orders', async (req, res) => {
   const session = client.startSession()
 
   try {
-    // MongoDB Atlas supports transactions on its replica sets.
-    // Order creation and all space reductions either commit together or abort.
+    // Reserve spaces and save the order in one transaction
     const booking = await session.withTransaction(async () => {
       const updatedLessons = []
       const lessonCollection = db.collection('lesson')
@@ -123,25 +120,34 @@ app.post('/orders', async (req, res) => {
       for (const [id, quantity] of quantities) {
         const objectId = new ObjectId(id)
 
-        // This filter only matches if enough spaces remain.
+        // Only update when enough spaces are available
         const result = await lessonCollection.updateOne(
-          { _id: objectId, space: { $gte: quantity } },
-          { $inc: { space: -quantity } },
+          {
+            _id: objectId,
+            space: { $gte: quantity }
+          },
+          {
+            $inc: { space: -quantity }
+          },
           { session }
         )
 
         if (result.matchedCount !== 1) {
-          const unavailable = new Error(
+          const error = new Error(
             'A selected lesson does not exist or has insufficient spaces'
           )
-          unavailable.statusCode = 409
-          throw unavailable
+
+          error.statusCode = 409
+          throw error
         }
 
-        // Read the new availability inside this transaction.
+        // Retrieve updated spaces inside the transaction
         const updatedLesson = await lessonCollection.findOne(
           { _id: objectId },
-          { projection: { space: 1 }, session }
+          {
+            projection: { space: 1 },
+            session
+          }
         )
 
         updatedLessons.push({
@@ -150,7 +156,8 @@ app.post('/orders', async (req, res) => {
         })
       }
 
-      const newOrder = {
+      // Prepare the MongoDB order
+      const order = {
         name: name.trim(),
         phone: phone.trim(),
         lessonIDs: lessonIDs.map(id => new ObjectId(id)),
@@ -158,13 +165,14 @@ app.post('/orders', async (req, res) => {
         orderDate: new Date()
       }
 
+      // Insert the order inside the same transaction
       const result = await db
         .collection('order')
-        .insertOne(newOrder, { session })
+        .insertOne(order, { session })
 
       return {
         orderId: result.insertedId,
-        numberOfSpaces: newOrder.numberOfSpaces,
+        numberOfSpaces: order.numberOfSpaces,
         updatedLessons
       }
     })
@@ -175,6 +183,7 @@ app.post('/orders', async (req, res) => {
       message: 'Order submitted successfully',
       ...booking
     })
+
   } catch (error) {
     console.error('Error processing booking:', error)
 
@@ -183,32 +192,53 @@ app.post('/orders', async (req, res) => {
         ? error.message
         : 'Unable to complete booking'
     })
+
   } finally {
     await session.endSession()
   }
 })
 
 // ======================================
-// UPDATE LESSON
+// PUT UPDATE LESSON
 // ======================================
 
-// General-purpose PUT: allows setting the permitted lesson attributes.
+// Supports normal lesson updates and conditional
+// availability confirmation after checkout.
+
 app.put('/lessons/:id', async (req, res) => {
   try {
     const lessonID = req.params.id
     const updates = req.body
 
+    // Validate MongoDB lesson ID
     if (!/^[a-fA-F0-9]{24}$/.test(lessonID)) {
-      return res.status(400).json({ error: 'Invalid lesson ID' })
+      return res.status(400).json({
+        error: 'Invalid lesson ID'
+      })
     }
 
-    const allowedFields = ['topic', 'location', 'price', 'space', 'image']
-
-    if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
-      return res.status(400).json({ error: 'Invalid update data' })
+    // Validate request body
+    if (
+      !updates ||
+      typeof updates !== 'object' ||
+      Array.isArray(updates)
+    ) {
+      return res.status(400).json({
+        error: 'Invalid update data'
+      })
     }
+
+    // Fields that can be updated
+    const allowedFields = [
+      'topic',
+      'location',
+      'price',
+      'space',
+      'image'
+    ]
 
     const fields = Object.keys(updates)
+
     if (
       fields.length === 0 ||
       fields.some(field => !allowedFields.includes(field))
@@ -218,29 +248,42 @@ app.put('/lessons/:id', async (req, res) => {
       })
     }
 
+    // Validate text attributes
     for (const field of ['topic', 'location', 'image']) {
       if (
         field in updates &&
-        (typeof updates[field] !== 'string' || updates[field].trim() === '')
+        (
+          typeof updates[field] !== 'string' ||
+          updates[field].trim() === ''
+        )
       ) {
-        return res.status(400).json({ error: `Invalid ${field} value` })
+        return res.status(400).json({
+          error: `Invalid ${field} value`
+        })
       }
     }
 
+    // Validate price
     if (
       'price' in updates &&
-      (typeof updates.price !== 'number' ||
+      (
+        typeof updates.price !== 'number' ||
         !Number.isFinite(updates.price) ||
-        updates.price < 0)
+        updates.price < 0
+      )
     ) {
       return res.status(400).json({
         error: 'Price must be a non-negative number'
       })
     }
 
+    // Validate available spaces
     if (
       'space' in updates &&
-      (!Number.isInteger(updates.space) || updates.space < 0)
+      (
+        !Number.isInteger(updates.space) ||
+        updates.space < 0
+      )
     ) {
       return res.status(400).json({
         error: 'Spaces must be a non-negative integer'
@@ -248,35 +291,101 @@ app.put('/lessons/:id', async (req, res) => {
     }
 
     const objectId = new ObjectId(lessonID)
-    const result = await db.collection('lesson').updateOne(
-      { _id: objectId },
-      { $set: updates }
-    )
 
-    if (result.matchedCount === 0) {
-      return res.status(404).json({ error: 'Lesson not found' })
+    const filter = {
+      _id: objectId
     }
 
+    // ======================================
+    // CONDITIONAL AVAILABILITY UPDATE
+    // ======================================
+
+    // Vue sends expectedSpace after POST /orders.
+    // POST has already deducted the booked spaces.
+    // PUT must not deduct them a second time.
+
+    if (req.query.expectedSpace !== undefined) {
+      const rawExpected = req.query.expectedSpace
+      const expectedSpace = Number(rawExpected)
+
+      // Validate the expected availability
+      if (
+        typeof rawExpected !== 'string' ||
+        !/^\d+$/.test(rawExpected) ||
+        !Number.isSafeInteger(expectedSpace) ||
+        fields.length !== 1 ||
+        fields[0] !== 'space' ||
+        updates.space !== expectedSpace
+      ) {
+        return res.status(400).json({
+          error: 'Invalid expectedSpace value'
+        })
+      }
+
+      // Only proceed if the database still has
+      // the same availability returned by POST.
+      filter.space = expectedSpace
+    }
+
+    // ======================================
+    // UPDATE MONGODB
+    // ======================================
+
+    const result = await db
+      .collection('lesson')
+      .updateOne(
+        filter,
+        { $set: updates }
+      )
+
+    // Handle missing lessons or changed availability
+    if (result.matchedCount === 0) {
+      const existingLesson = await db
+        .collection('lesson')
+        .findOne(
+          { _id: objectId },
+          { projection: { _id: 1 } }
+        )
+
+      if (!existingLesson) {
+        return res.status(404).json({
+          error: 'Lesson not found'
+        })
+      }
+
+      return res.status(409).json({
+        error: 'Lesson availability has changed; refresh your lessons'
+      })
+    }
+
+    // Retrieve updated lesson information
     const updatedLesson = await db
       .collection('lesson')
       .findOne({ _id: objectId })
 
-    res.json({
+    return res.json({
       message: 'Lesson updated successfully',
+      modifiedCount: result.modifiedCount,
       lesson: updatedLesson
     })
+
   } catch (error) {
     console.error('Error updating lesson:', error)
-    res.status(500).json({ error: 'Failed to update lesson' })
+
+    return res.status(500).json({
+      error: 'Failed to update lesson'
+    })
   }
 })
 
 // ======================================
-// HANDLE UNKNOWN ROUTES
+// UNKNOWN ROUTES
 // ======================================
 
 app.use((req, res) => {
-  res.status(404).json({ error: 'Route not found' })
+  res.status(404).json({
+    error: 'Route not found'
+  })
 })
 
 // ======================================
@@ -284,5 +393,7 @@ app.use((req, res) => {
 // ======================================
 
 app.listen(PORT, () => {
-  console.log(`Huz Academy backend running on port ${PORT}`)
+  console.log(
+    `Huz Academy backend running on port ${PORT}`
+  )
 })
